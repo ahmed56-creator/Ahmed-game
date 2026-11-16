@@ -424,6 +424,7 @@
     let moveTouch = null, fireTouch = null, lastTouchTime = 0;
     let mode = 'single';
     let pvp = null, pvpSession = 0, lastPvpFrame = 0;
+    let lastStateAt = 0, lastInputAt = 0;
     let mouseHeld = false;
     let restartFn = () => startGame();
 
@@ -442,6 +443,7 @@
         fallbackTimer: null,
         helloTimer: null,
         ignoreClose: false,
+        watchTimer: null,
         remoteInput: { dx: 0, dy: 0, aim: 0, shoot: false }
     };
 
@@ -870,10 +872,12 @@
         clearInterval(net.inputTimer);
         clearInterval(net.stateTimer);
         clearInterval(net.helloTimer);
+        clearInterval(net.watchTimer);
         clearTimeout(net.fallbackTimer);
         net.inputTimer = null;
         net.stateTimer = null;
         net.helloTimer = null;
+        net.watchTimer = null;
         net.fallbackTimer = null;
         net.ignoreClose = true;
         if (net.conn) {
@@ -1027,6 +1031,7 @@
     function handleHostData(data) {
         if (!data) return;
         if (data.t === 'input') {
+            lastInputAt = Date.now();
             net.remoteInput.dx = Number(data.dx) || 0;
             net.remoteInput.dy = Number(data.dy) || 0;
             net.remoteInput.aim = Number(data.aim) || 0;
@@ -1057,13 +1062,17 @@
             clearInterval(net.helloTimer);
             net.helloTimer = null;
             if (data.restart || mode !== 'pvp' || net.role !== 'guest') startPvp('guest');
+            setOnlineStatus('بدأت المباراة ✅');
         } else if (data.t === 'state') {
             if (net.helloTimer) {
                 clearInterval(net.helloTimer);
                 net.helloTimer = null;
             }
-            if (mode !== 'pvp' || net.role !== 'guest') startPvp('guest');
+            const wasStarted = mode === 'pvp' && net.role === 'guest';
+            if (!wasStarted) startPvp('guest');
+            lastStateAt = Date.now();
             applyPvpSnapshot(data);
+            if (!wasStarted) setOnlineStatus('بدأت المباراة ✅');
         }
     }
 
@@ -1072,8 +1081,10 @@
         if (net.transport === 'mqtt') return;
         clearInterval(net.inputTimer);
         clearInterval(net.stateTimer);
+        clearInterval(net.watchTimer);
         net.inputTimer = null;
         net.stateTimer = null;
+        net.watchTimer = null;
         net.conn = null;
         setOnlineStatus('انقطع الاتصال ❌');
         leaveOnlineBtn.style.display = 'none';
@@ -1149,14 +1160,34 @@
         clearInterval(net.inputTimer);
         clearInterval(net.stateTimer);
         clearInterval(net.helloTimer);
+        clearInterval(net.watchTimer);
         net.inputTimer = null;
         net.stateTimer = null;
         net.helloTimer = null;
+        net.watchTimer = null;
+        lastStateAt = Date.now();
+        lastInputAt = Date.now();
         const relay = net.transport === 'mqtt';
         if (role === 'host') {
             net.stateTimer = setInterval(broadcastPvpState, relay ? 60 : 50);
         } else {
             net.inputTimer = setInterval(sendGuestInput, relay ? 60 : 33);
+        }
+
+        if (relay) {
+            net.watchTimer = setInterval(() => {
+                if (mode !== 'pvp' || !pvp || pvp.over || pvp.disconnected) return;
+                const gap = role === 'guest' ? Date.now() - lastStateAt : Date.now() - lastInputAt;
+                if (gap > 5000) {
+                    clearInterval(net.watchTimer);
+                    net.watchTimer = null;
+                    pvp.over = true;
+                    pvp.disconnected = true;
+                    pvp.winner = null;
+                    setOnlineStatus('الاتصال بصاحبك اتقطع ❌');
+                    showRestart('رجوع للعب الفردي 🔙', () => exitOnline());
+                }
+            }, 1000);
         }
 
         requestAnimationFrame(pvpLoop);
