@@ -819,12 +819,18 @@
             leaveOnlineBtn.style.display = 'block';
             setOnlineStatus(role === 'host'
                 ? 'متصل ✅ (سيرفر احتياطي) استنى صاحبك ينضم…'
-                : 'متصل ✅ (سيرفر احتياطي) جاري بدء المباراة…');
+                : 'متصل ✅ (سيرفر احتياطي) بستنى رد صاحبك…');
             clearInterval(net.helloTimer);
             if (role === 'guest') {
+                let tries = 0;
                 netSend({ t: 'hello' });
                 net.helloTimer = setInterval(() => {
-                    if (mode !== 'pvp') netSend({ t: 'hello' });
+                    if (mode === 'pvp') return;
+                    tries++;
+                    netSend({ t: 'hello' });
+                    if (tries === 10) {
+                        setOnlineStatus('مفيش رد من صاحبك ⏳ اتأكد إنه فاتح نفس اللينك وبنفس الكود.');
+                    }
                 }, 900);
             } else {
                 netSend({ t: 'hostHere' });
