@@ -24,6 +24,7 @@
             min-height: 100dvh;
             overflow-x: hidden;
             overflow-y: auto;
+            overscroll-behavior: none;
             padding: 4px 0 10px;
             touch-action: manipulation;
             -webkit-tap-highlight-color: transparent;
@@ -59,7 +60,8 @@
             position: relative;
             width: 95vw;
             max-width: 800px;
-            aspect-ratio: 16 / 10;
+            width: min(95vw, 800px, max(300px, calc((100dvh - 245px) * 1.6)));
+            aspect-ratio: 8 / 5;
         }
         canvas {
             width: 100%;
@@ -212,6 +214,7 @@
             gap: 10px;
             margin-top: 10px;
             padding: 0 8px;
+            direction: ltr;
             touch-action: none;
             user-select: none;
         }
@@ -269,6 +272,20 @@
                 min-width: 84px;
                 font-size: 13px;
             }
+            #hud, #pvpBar {
+                font-size: 14px;
+                gap: 6px 12px;
+                padding: 5px 10px;
+                margin-bottom: 6px;
+            }
+            #mode-btns {
+                gap: 6px;
+                margin-bottom: 6px;
+            }
+            #mode-btns button {
+                padding: 6px 10px;
+                font-size: 13px;
+            }
         }
         @media (max-height: 720px) {
             body {
@@ -288,9 +305,83 @@
                 margin-top: 6px;
             }
         }
+        /* Short landscape screens (phones, but also small desktop windows):
+           never let the canvas push the page into a scroll. */
+        @media (orientation: landscape) and (max-height: 520px) {
+            body {
+                justify-content: flex-start;
+            }
+            h1 {
+                display: none;
+            }
+            #hud, #pvpBar {
+                font-size: 14px;
+                gap: 10px;
+                padding: 4px 10px;
+                margin-bottom: 4px;
+            }
+            #mode-btns {
+                margin-bottom: 4px;
+            }
+            #game-container {
+                width: min(96vw, 800px, calc((100dvh - 96px) * 1.6));
+            }
+        }
+        @media (pointer: coarse) {
+            :root {
+                --ctrl-size: 58px;
+            }
+            canvas {
+                box-shadow: none;
+            }
+            #mode-btns {
+                gap: 8px;
+                margin-bottom: 8px;
+            }
+            #mode-btns button {
+                padding: 7px 12px;
+                font-size: 14px;
+            }
+        }
         @media (pointer: coarse) and (orientation: landscape) {
             :root {
-                --ctrl-size: 50px;
+                --ctrl-size: 46px;
+            }
+            body {
+                justify-content: flex-start;
+                overflow: hidden;
+                padding: 2px 0;
+            }
+            h1 {
+                display: none;
+            }
+            #hud, #pvpBar {
+                font-size: 14px;
+                gap: 10px;
+                padding: 4px 10px;
+                margin-bottom: 4px;
+            }
+            #mode-btns {
+                margin-bottom: 4px;
+            }
+            #game-container {
+                width: min(96vw, 800px, calc((100dvh - 78px) * 1.6));
+            }
+            #mobile-controls {
+                position: fixed;
+                left: 0;
+                right: 0;
+                bottom: 2px;
+                width: 100%;
+                max-width: none;
+                margin: 0;
+                padding: 0 10px;
+                z-index: 60;
+                pointer-events: none;
+            }
+            #mobile-controls > * {
+                pointer-events: auto;
+                opacity: 0.88;
             }
         }
     </style>
@@ -363,14 +454,54 @@
 <script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.4/dist/mqtt.min.js"></script>
 <script>
     const canvas = document.getElementById('gameCanvas');
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     const scoreEl = document.getElementById('score');
     const levelEl = document.getElementById('level');
     const healthEl = document.getElementById('health');
     const ammoEl = document.getElementById('ammo');
     const restartBtn = document.getElementById('restartBtn');
     const botBtn = document.getElementById('botBtn');
-    const touchMode = window.matchMedia('(pointer: coarse)').matches;
+    const touchMode = true || window.matchMedia('(pointer: coarse)').matches ||
+        ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+
+    // Static background (gradient + grid) drawn once, then blitted every frame.
+    const bgCanvas = document.createElement('canvas');
+    bgCanvas.width = canvas.width;
+    bgCanvas.height = canvas.height;
+    (function buildBackground() {
+        const b = bgCanvas.getContext('2d');
+        const g = b.createRadialGradient(
+            canvas.width / 2, canvas.height / 2, 20,
+            canvas.width / 2, canvas.height / 2, canvas.width * 0.7
+        );
+        g.addColorStop(0, '#384a31');
+        g.addColorStop(1, '#1b2617');
+        b.fillStyle = g;
+        b.fillRect(0, 0, canvas.width, canvas.height);
+        b.strokeStyle = 'rgba(255,255,255,0.045)';
+        b.lineWidth = 1;
+        b.beginPath();
+        for (let x = 0; x <= canvas.width; x += 50) {
+            b.moveTo(x + 0.5, 0);
+            b.lineTo(x + 0.5, canvas.height);
+        }
+        for (let y = 0; y <= canvas.height; y += 50) {
+            b.moveTo(0, y + 0.5);
+            b.lineTo(canvas.width, y + 0.5);
+        }
+        b.stroke();
+    })();
+    function drawBackground() {
+        ctx.drawImage(bgCanvas, 0, 0);
+    }
+
+    // Only touch the DOM when a value really changed (big mobile perf win).
+    const textCache = new Map();
+    function setText(el, value) {
+        if (textCache.get(el) === value) return;
+        textCache.set(el, value);
+        el.textContent = value;
+    }
 
     const hudEl = document.getElementById('hud');
     const pvpBar = document.getElementById('pvpBar');
@@ -440,12 +571,23 @@
 
     // Web Audio API sound effects (no external files required)
     const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    let lastSoundType = '';
+    let lastSoundAt = 0;
     function playSound(type) {
+        // Throttle identical sounds: less audio work = less stutter on phones.
+        const nowMs = performance.now();
+        if (type === lastSoundType && nowMs - lastSoundAt < 45) return;
+        lastSoundType = type;
+        lastSoundAt = nowMs;
         if (audioCtx.state === 'suspended') audioCtx.resume();
         const osc = audioCtx.createOscillator();
         const gain = audioCtx.createGain();
         osc.connect(gain);
         gain.connect(audioCtx.destination);
+        osc.onended = () => {
+            try { osc.disconnect(); } catch (e) {}
+            try { gain.disconnect(); } catch (e) {}
+        };
         const now = audioCtx.currentTime;
 
         if (type === 'shoot') {
@@ -506,10 +648,10 @@
         moveTouch = null;
         fireTouch = null;
 
-        scoreEl.innerText = score;
-        levelEl.innerText = level;
-        healthEl.innerText = health;
-        ammoEl.innerText = ammo;
+        setText(scoreEl, score);
+        setText(levelEl, level);
+        setText(healthEl, health);
+        setText(ammoEl, ammo);
         restartBtn.style.display = 'none';
         restartBtn.innerText = 'العب مرة أخرى 🔄';
         restartFn = () => startGame();
@@ -517,11 +659,19 @@
         pvpBar.style.display = 'none';
         onlinePanel.classList.remove('open');
 
+        startSpawnTimers();
+        requestAnimationFrame(update);
+    }
+
+    function spawnDelay() {
+        return Math.max(450, 1200 - level * 120);
+    }
+
+    function startSpawnTimers() {
         clearInterval(enemyInterval);
         clearInterval(pickupInterval);
-        enemyInterval = setInterval(spawnEnemy, 1200);
+        enemyInterval = setInterval(spawnEnemy, spawnDelay());
         pickupInterval = setInterval(spawnPickup, 8000);
-        requestAnimationFrame(update);
     }
 
     function restartCurrent() {
@@ -535,13 +685,34 @@
     }
 
     window.addEventListener('keydown', e => {
+        const tag = (e.target && e.target.tagName) || '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
         const k = e.key.toLowerCase();
         keys[k] = true;
         if (k === 'r') reload();
         if (k === 'b') toggleBot();
+        if (k.startsWith('arrow') || k === ' ') e.preventDefault();
     });
     window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
     window.addEventListener('blur', () => { keys = {}; shootingHeld = false; moveTouch = null; fireTouch = null; mouseHeld = false; });
+
+    // Stop the world when the tab/app goes to the background (no enemy pile-up,
+    // no wasted battery), then resume cleanly.
+    document.addEventListener('visibilitychange', () => {
+        if (mode !== 'single' || gameOver) return;
+        if (document.hidden) {
+            clearInterval(enemyInterval);
+            clearInterval(pickupInterval);
+            keys = {};
+            shootingHeld = false;
+            moveTouch = null;
+            fireTouch = null;
+            mouseHeld = false;
+        } else {
+            lastFrame = 0;
+            startSpawnTimers();
+        }
+    });
 
     function getCanvasCoords(clientX, clientY) {
         const rect = canvas.getBoundingClientRect();
@@ -566,26 +737,32 @@
     window.addEventListener('mouseup', () => { mouseHeld = false; });
 
     // Touch controls on the canvas itself:
-    // left half = drag to move (virtual joystick), right half = hold to shoot (auto-aim)
+    // left side = drag to move (virtual joystick), right side = hold to aim + shoot
+    const JOY_RADIUS = 74;
+    const JOY_DEAD = 6;
+
+    function startJoystick(id, p) {
+        moveTouch = {
+            id,
+            startX: p.x,
+            startY: p.y,
+            curX: p.x,
+            curY: p.y
+        };
+    }
+
     canvas.addEventListener('touchstart', e => {
         e.preventDefault();
         lastTouchTime = Date.now();
         for (const touch of e.changedTouches) {
             const p = getCanvasCoords(touch.clientX, touch.clientY);
-            if (p.x < canvas.width / 2) {
-                if (!moveTouch) {
-                    moveTouch = {
-                        id: touch.identifier,
-                        startX: p.x,
-                        startY: p.y,
-                        curX: p.x,
-                        curY: p.y
-                    };
-                }
+            if (p.x < canvas.width * 0.52) {
+                if (!moveTouch) startJoystick(touch.identifier, p);
             } else if (!fireTouch) {
                 fireTouch = { id: touch.identifier };
                 mouse = { x: p.x, y: p.y };
-                shoot(true);
+                if (mode === 'single') shoot(true);
+                else if (mode === 'pvp') sendGuestInput();
             }
         }
     }, { passive: false });
@@ -594,10 +771,12 @@
         e.preventDefault();
         lastTouchTime = Date.now();
         for (const touch of e.changedTouches) {
+            const p = getCanvasCoords(touch.clientX, touch.clientY);
             if (moveTouch && touch.identifier === moveTouch.id) {
-                const p = getCanvasCoords(touch.clientX, touch.clientY);
                 moveTouch.curX = p.x;
                 moveTouch.curY = p.y;
+            } else if (fireTouch && touch.identifier === fireTouch.id) {
+                mouse = { x: p.x, y: p.y };
             }
         }
     }, { passive: false });
@@ -605,10 +784,15 @@
     function endCanvasTouch(e) {
         if (e.cancelable) e.preventDefault();
         lastTouchTime = Date.now();
+        let fireReleased = false;
         for (const touch of e.changedTouches) {
             if (moveTouch && touch.identifier === moveTouch.id) moveTouch = null;
-            if (fireTouch && touch.identifier === fireTouch.id) fireTouch = null;
+            if (fireTouch && touch.identifier === fireTouch.id) {
+                fireTouch = null;
+                fireReleased = true;
+            }
         }
+        if (fireReleased && mode === 'pvp') sendGuestInput();
     }
     canvas.addEventListener('touchend', endCanvasTouch, { passive: false });
     canvas.addEventListener('touchcancel', endCanvasTouch, { passive: false });
@@ -616,12 +800,25 @@
     // Held buttons (pointer events = reliable on phones, no stuck keys)
     function bindHoldBtn(id, onDown, onUp) {
         const btn = document.getElementById(id);
-        const down = e => { e.preventDefault(); onDown(); };
-        const up = e => { if (e) e.preventDefault(); onUp(); };
+        let activeId = null;
+        const down = e => {
+            e.preventDefault();
+            if (activeId !== null) return;
+            activeId = e.pointerId;
+            try { btn.setPointerCapture(activeId); } catch (err) {}
+            onDown();
+        };
+        const up = e => {
+            if (activeId === null) return;
+            if (e && e.pointerId !== undefined && e.pointerId !== activeId) return;
+            if (e && e.cancelable) e.preventDefault();
+            activeId = null;
+            onUp();
+        };
         btn.addEventListener('pointerdown', down);
         btn.addEventListener('pointerup', up);
         btn.addEventListener('pointercancel', up);
-        btn.addEventListener('pointerleave', up);
+        btn.addEventListener('lostpointercapture', up);
         btn.addEventListener('contextmenu', e => e.preventDefault());
     }
 
@@ -633,8 +830,12 @@
     bindHoldBtn('btn-shoot', () => {
         shootingHeld = true;
         holdFireTimer = 0;
-        shoot(touchMode);
-    }, () => { shootingHeld = false; });
+        if (mode === 'single') shoot(touchMode);
+        else if (mode === 'pvp') sendGuestInput();
+    }, () => {
+        shootingHeld = false;
+        if (mode === 'pvp') sendGuestInput();
+    });
 
     function nearestEnemy() {
         let best = null, bestDist = Infinity;
@@ -657,18 +858,18 @@
         if (mode !== 'single' || gameOver) return;
         ammo = 30;
         autoReloadTimer = 0;
-        ammoEl.innerText = ammo;
+        setText(ammoEl, ammo);
         playSound('reload');
     }
 
     function shoot(autoAim = false) {
         if (mode !== 'single' || gameOver) return;
         if (ammo <= 0) {
-            ammoEl.innerText = 'تعبئة تلقائية…';
+            setText(ammoEl, 'تعبئة تلقائية…');
             return;
         }
         ammo--;
-        ammoEl.innerText = ammo;
+        setText(ammoEl, ammo);
         playSound('shoot');
 
         const target = autoAim ? nearestEnemy() : null;
@@ -723,7 +924,7 @@
 
         const mag = Math.hypot(vx, vy);
         if (mag > 0.01) {
-            const sp = player.speed * 0.95;
+            const sp = player.speed * 0.95 * (dt / 16.67);
             player.x += (vx / mag) * sp;
             player.y += (vy / mag) * sp;
         }
@@ -1145,6 +1346,8 @@
                 { x: spawns[1].x, y: spawns[1].y, tx: spawns[1].x, ty: spawns[1].y, radius: 18, angle: Math.PI, health: 100, score: 0, alive: true, respawnAt: 0, nextShot: 0 }
             ],
             bullets: [],
+            myBullets: [],
+            myNextShot: 0,
             winner: null,
             over: false,
             disconnected: false,
@@ -1166,9 +1369,9 @@
         lastInputAt = Date.now();
         const relay = net.transport === 'mqtt';
         if (role === 'host') {
-            net.stateTimer = setInterval(broadcastPvpState, relay ? 60 : 50);
+            net.stateTimer = setInterval(broadcastPvpState, 50);
         } else {
-            net.inputTimer = setInterval(sendGuestInput, relay ? 60 : 33);
+            net.inputTimer = setInterval(sendGuestInput, relay ? 50 : 33);
         }
 
         if (relay) {
@@ -1195,9 +1398,9 @@
         const myIdx = net.role === 'host' ? 0 : 1;
         const me = pvp.players[myIdx];
         const foe = pvp.players[1 - myIdx];
-        pvpMeEl.innerText = me.score;
-        pvpThemEl.innerText = foe.score;
-        pvpHealthEl.innerText = Math.max(0, Math.round(me.health));
+        setText(pvpMeEl, me.score);
+        setText(pvpThemEl, foe.score);
+        setText(pvpHealthEl, Math.max(0, Math.round(me.health)));
     }
 
     function getInputVector() {
@@ -1210,8 +1413,8 @@
             const jx = moveTouch.curX - moveTouch.startX;
             const jy = moveTouch.curY - moveTouch.startY;
             const d = Math.hypot(jx, jy);
-            if (d > 8) {
-                const k = Math.min(1, d / 70);
+            if (d > JOY_DEAD) {
+                const k = Math.min(1, d / 55);
                 dx += (jx / d) * k;
                 dy += (jy / d) * k;
             }
@@ -1255,12 +1458,15 @@
 
         const v = getInputVector();
         if (p1.alive) movePvpPlayer(p1, v.x, v.y, dt);
-        p1.angle = Math.atan2(mouse.y - p1.y, mouse.x - p1.x);
+        const shootingNow = p1.alive && touchFiring() && !pvp.over;
+        let a1 = Math.atan2(mouse.y - p1.y, mouse.x - p1.x);
+        a1 = resolveAim(p1, p2, a1, shootingNow);
+        p1.angle = a1;
 
         if (p2.alive) movePvpPlayer(p2, net.remoteInput.dx, net.remoteInput.dy, dt);
         p2.angle = net.remoteInput.aim;
 
-        if (p1.alive && (mouseHeld || shootingHeld || fireTouch)) firePvpBullet(1, now);
+        if (shootingNow) firePvpBullet(1, now);
         if (p2.alive && net.remoteInput.shoot) firePvpBullet(2, now);
 
         for (let i = 0; i < 2; i++) {
@@ -1318,8 +1524,10 @@
         const me = pvp.players[1];
         const foe = pvp.players[0];
 
-        foe.x += (foe.tx - foe.x) * 0.35;
-        foe.y += (foe.ty - foe.y) * 0.35;
+        // Frame-rate independent smoothing of the opponent's position
+        const smooth = 1 - Math.pow(0.62, dt / 16.67);
+        foe.x += (foe.tx - foe.x) * smooth;
+        foe.y += (foe.ty - foe.y) * smooth;
 
         if (!pvp.over && pvp.pred) {
             const v = getInputVector();
@@ -1334,28 +1542,86 @@
             me.y = pvp.pred.y;
         }
 
-        me.angle = Math.atan2(mouse.y - me.y, mouse.x - me.x);
+        // Move the guest's own predicted bullets so shots feel instant on a relay
+        if (pvp.myBullets && pvp.myBullets.length) {
+            const step = 11 * (dt / 16.67);
+            for (let i = pvp.myBullets.length - 1; i >= 0; i--) {
+                const b = pvp.myBullets[i];
+                b.x += Math.cos(b.angle) * step;
+                b.y += Math.sin(b.angle) * step;
+                if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+                    pvp.myBullets.splice(i, 1);
+                }
+            }
+        }
+        if (!me.alive && pvp.myBullets) pvp.myBullets.length = 0;
+
+        const baseAim = Math.atan2(mouse.y - me.y, mouse.x - me.x);
+        me.angle = resolveAim(me, foe, baseAim, touchFiring() && !pvp.over);
         updatePvpHud();
+    }
+
+    // On phones a small aim assist makes PvP actually playable with two thumbs
+    function touchFiring() {
+        return !!(shootingHeld || fireTouch || mouseHeld);
+    }
+
+    // While firing on a phone the barrel locks onto the opponent: the canvas is
+    // only ~370px wide there, so precise thumb aiming is basically luck.
+    function resolveAim(from, to, base, shooting) {
+        if (!touchMode || !shooting || !to || !to.alive) return base;
+        return Math.atan2(to.y - from.y, to.x - from.x);
+    }
+
+    // Guest draws its own bullet immediately instead of waiting for the relay.
+    function spawnGuestBullet(me, angle) {
+        const now = performance.now();
+        if (now < pvp.myNextShot) return;
+        pvp.myNextShot = now + 220;
+        pvp.myBullets.push({
+            x: me.x + Math.cos(angle) * 22,
+            y: me.y + Math.sin(angle) * 22,
+            angle,
+            owner: 2
+        });
+        playSound('shoot');
     }
 
     function sendGuestInput() {
         if (!isNetReady() || !pvp || net.role !== 'guest') return;
         const v = getInputVector();
         const me = pvp.players[1];
-        const aim = Math.atan2(mouse.y - me.y, mouse.x - me.x);
+        const foe = pvp.players[0];
+        const shootingNow = touchFiring() && !pvp.over && me.alive;
+        let aim = Math.atan2(mouse.y - me.y, mouse.x - me.x);
+        aim = resolveAim(me, foe, aim, shootingNow);
+        me.angle = aim;
+        if (shootingNow) {
+            // Instant local muzzle feedback (the host confirms the hit)
+            pvp.lastShotAt = performance.now();
+            pvp.lastShotAngle = aim;
+            spawnGuestBullet(me, aim);
+        }
         netSend({
             t: 'input',
             dx: Math.round(v.x * 100) / 100,
             dy: Math.round(v.y * 100) / 100,
             aim: Math.round(aim * 100) / 100,
-            shoot: (shootingHeld || fireTouch || mouseHeld) && !pvp.over
+            shoot: shootingNow
         });
+    }
+
+    function readNetPlayer(v) {
+        if (Array.isArray(v)) {
+            return { x: v[0], y: v[1], an: v[2], h: v[3], s: v[4], a: v[5] };
+        }
+        return { x: v.x, y: v.y, an: v.an, h: v.h, s: v.s, a: v.a };
     }
 
     function applyPvpSnapshot(data) {
         if (!pvp || !data || !data.p || !data.p[0] || !data.p[1]) return;
-        const hostP = data.p[0];
-        const guestP = data.p[1];
+        const hostP = readNetPlayer(data.p[0]);
+        const guestP = readNetPlayer(data.p[1]);
 
         const foe = pvp.players[0];
         foe.tx = hostP.x;
@@ -1391,7 +1657,11 @@
         me.x = pvp.pred.x;
         me.y = pvp.pred.y;
 
-        pvp.bullets = (data.b || []).map(b => ({ x: b.x, y: b.y, owner: b.o }));
+        pvp.bullets = (data.b || []).map(b => Array.isArray(b)
+            ? { x: b[0], y: b[1], owner: b[2] }
+            : { x: b.x, y: b.y, owner: b.o })
+            .filter(b => b.owner !== 2)
+            .concat(pvp.myBullets || []);
 
         pvp.over = !!data.o;
         pvp.winner = data.w || null;
@@ -1404,21 +1674,21 @@
 
     function broadcastPvpState() {
         if (!isNetReady() || !pvp) return;
-        const pack = p => ({
-            x: Math.round(p.x),
-            y: Math.round(p.y),
-            an: Math.round(p.angle * 100) / 100,
-            h: Math.max(0, Math.round(p.health)),
-            s: p.score,
-            a: p.alive ? 1 : 0,
-            r: p.alive ? 0 : Math.max(0, Math.round(p.respawnAt - performance.now()))
-        });
+        // Compact array packet = ~half the bytes = less lag on mobile data
+        const pack = p => [
+            Math.round(p.x),
+            Math.round(p.y),
+            Math.round(p.angle * 100) / 100,
+            Math.max(0, Math.round(p.health)),
+            p.score,
+            p.alive ? 1 : 0
+        ];
         netSend({
             t: 'state',
             p: [pack(pvp.players[0]), pack(pvp.players[1])],
-            b: pvp.bullets.map(b => ({ x: Math.round(b.x), y: Math.round(b.y), o: b.owner })),
+            b: pvp.bullets.map(b => [Math.round(b.x), Math.round(b.y), b.owner]),
             o: pvp.over ? 1 : 0,
-            w: pvp.winner
+            w: pvp.winner || 0
         });
     }
 
@@ -1471,16 +1741,7 @@
     }
 
     function drawPvp() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
-        ctx.lineWidth = 1;
-        for (let x = 0; x < canvas.width; x += 50) {
-            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-        }
-        for (let y = 0; y < canvas.height; y += 50) {
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-        }
+        drawBackground();
 
         ctx.fillStyle = '#ffeb3b';
         pvp.bullets.forEach(b => {
@@ -1493,6 +1754,20 @@
         pvp.players.forEach((p, i) => {
             drawPvpPlayer(p, i === myIdx ? '#2f80ed' : '#e53935', i === myIdx ? 'أنت 🔵' : 'الخصم 🔴');
         });
+
+        // Guest: instant muzzle flash so shooting doesn't feel delayed
+        if (net.role === 'guest' && pvp.lastShotAt && performance.now() - pvp.lastShotAt < 90) {
+            const me = pvp.players[1];
+            const a = pvp.lastShotAngle || me.angle;
+            ctx.save();
+            ctx.strokeStyle = '#ffe74c';
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.moveTo(me.x + Math.cos(a) * 20, me.y + Math.sin(a) * 20);
+            ctx.lineTo(me.x + Math.cos(a) * 46, me.y + Math.sin(a) * 46);
+            ctx.stroke();
+            ctx.restore();
+        }
 
         if (pvp.over) {
             ctx.fillStyle = 'rgba(0, 0, 0, 0.78)';
@@ -1508,6 +1783,8 @@
             ctx.font = '24px Tahoma';
             ctx.fillText('النتيجة: ' + pvp.players[myIdx].score + ' - ' + pvp.players[1 - myIdx].score, canvas.width / 2, canvas.height / 2 + 28);
         }
+
+        drawTouchOverlay();
     }
 
     createRoomBtn.addEventListener('click', () => createRoom(0));
@@ -1571,25 +1848,26 @@
         // Auto reload (auto "R") when the magazine is empty
         if (ammo <= 0) {
             autoReloadTimer += dt;
-            ammoEl.innerText = 'تعبئة تلقائية…';
+            setText(ammoEl, 'تعبئة تلقائية…');
             if (autoReloadTimer >= 500) reload();
         }
 
         if (botEnabled) {
             botThink(dt);
         } else {
-            if ((keys['arrowup'] || keys['w']) && player.y > player.radius) player.y -= player.speed;
-            if ((keys['arrowdown'] || keys['s']) && player.y < canvas.height - player.radius) player.y += player.speed;
-            if ((keys['arrowleft'] || keys['a']) && player.x > player.radius) player.x -= player.speed;
-            if ((keys['arrowright'] || keys['d']) && player.x < canvas.width - player.radius) player.x += player.speed;
+            const step = player.speed * (dt / 16.67);
+            if ((keys['arrowup'] || keys['w']) && player.y > player.radius) player.y -= step;
+            if ((keys['arrowdown'] || keys['s']) && player.y < canvas.height - player.radius) player.y += step;
+            if ((keys['arrowleft'] || keys['a']) && player.x > player.radius) player.x -= step;
+            if ((keys['arrowright'] || keys['d']) && player.x < canvas.width - player.radius) player.x += step;
 
-            // Drag anywhere on the left half of the screen to move
+            // Drag on the left side of the screen to move (virtual joystick)
             if (moveTouch) {
                 const dx = moveTouch.curX - moveTouch.startX;
                 const dy = moveTouch.curY - moveTouch.startY;
                 const dist = Math.hypot(dx, dy);
-                if (dist > 8) {
-                    const speed = player.speed * Math.min(1, dist / 70);
+                if (dist > JOY_DEAD) {
+                    const speed = step * Math.min(1, dist / 55);
                     player.x += (dx / dist) * speed;
                     player.y += (dy / dist) * speed;
                 }
@@ -1607,13 +1885,19 @@
             }
         }
 
-        player.angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+        // On phones keep the barrel pointing at what auto-aim will hit
+        const autoTarget = (touchMode && (fireTouch || shootingHeld)) ? nearestEnemy() : null;
+        player.angle = autoTarget
+            ? Math.atan2(autoTarget.y - player.y, autoTarget.x - player.x)
+            : Math.atan2(mouse.y - player.y, mouse.x - player.x);
+
+        const k = dt / 16.67;
 
         // Update bullets
         for (let i = bullets.length - 1; i >= 0; i--) {
             const b = bullets[i];
-            b.x += b.vx;
-            b.y += b.vy;
+            b.x += b.vx * k;
+            b.y += b.vy * k;
             if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
                 bullets.splice(i, 1);
             }
@@ -1624,7 +1908,7 @@
             const p = pickups[i];
             if (Math.hypot(player.x - p.x, player.y - p.y) < player.radius + p.radius) {
                 health = Math.min(100, health + 25);
-                healthEl.innerText = health;
+                setText(healthEl, health);
                 playSound('pickup');
                 pickups.splice(i, 1);
             }
@@ -1634,13 +1918,13 @@
         for (let ei = enemies.length - 1; ei >= 0; ei--) {
             const enemy = enemies[ei];
             const angle = Math.atan2(player.y - enemy.y, player.x - enemy.x);
-            enemy.x += Math.cos(angle) * enemy.speed;
-            enemy.y += Math.sin(angle) * enemy.speed;
+            enemy.x += Math.cos(angle) * enemy.speed * k;
+            enemy.y += Math.sin(angle) * enemy.speed * k;
 
             // Collision with player
             if (Math.hypot(player.x - enemy.x, player.y - enemy.y) < player.radius + enemy.radius) {
                 health -= 15;
-                healthEl.innerText = Math.max(0, health);
+                setText(healthEl, Math.max(0, health));
                 playSound('hit');
                 enemies.splice(ei, 1);
                 if (health <= 0) {
@@ -1660,13 +1944,13 @@
                     if (enemy.hp <= 0) {
                         enemies.splice(ei, 1);
                         score += 10;
-                        scoreEl.innerText = score;
+                        setText(scoreEl, score);
                         const newLevel = Math.floor(score / 100) + 1;
                         if (newLevel > level) {
                             level = newLevel;
-                            levelEl.innerText = level;
+                            setText(levelEl, level);
                             clearInterval(enemyInterval);
-                            enemyInterval = setInterval(spawnEnemy, Math.max(450, 1200 - (level * 120)));
+                            enemyInterval = setInterval(spawnEnemy, spawnDelay());
                         }
                     }
                     break;
@@ -1679,17 +1963,7 @@
     }
 
     function draw() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        // Grid background detail
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
-        ctx.lineWidth = 1;
-        for (let x = 0; x < canvas.width; x += 50) {
-            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-        }
-        for (let y = 0; y < canvas.height; y += 50) {
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-        }
+        drawBackground();
 
         // Draw health pickups
         pickups.forEach(p => {
@@ -1738,36 +2012,54 @@
             ctx.stroke();
         });
 
-        // Touch joystick indicator
-        if (moveTouch) {
-            const maxR = 60;
-            const dx = moveTouch.curX - moveTouch.startX;
-            const dy = moveTouch.curY - moveTouch.startY;
-            const dist = Math.hypot(dx, dy) || 1;
-            const kx = moveTouch.startX + (dx / dist) * Math.min(dist, maxR);
-            const ky = moveTouch.startY + (dy / dist) * Math.min(dist, maxR);
-            ctx.save();
-            ctx.strokeStyle = 'rgba(212, 175, 55, 0.5)';
-            ctx.lineWidth = 3;
-            ctx.beginPath();
-            ctx.arc(moveTouch.startX, moveTouch.startY, maxR, 0, Math.PI * 2);
-            ctx.stroke();
-            ctx.fillStyle = 'rgba(212, 175, 55, 0.6)';
-            ctx.beginPath();
-            ctx.arc(kx, ky, 22, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.restore();
-        }
+        drawTouchOverlay();
+    }
 
-        // Touch hints
+    function drawTouchOverlay() {
+        // Touch controls indicator
         if (touchMode) {
             ctx.save();
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.28)';
-            ctx.font = '16px Tahoma';
-            ctx.textAlign = 'left';
-            ctx.fillText('اسحب للحركة', 16, canvas.height - 16);
-            ctx.textAlign = 'right';
-            ctx.fillText('اضغط للإطلاق', canvas.width - 16, canvas.height - 16);
+            let baseX, baseY, knobX, knobY, active = false;
+            if (moveTouch) {
+                baseX = moveTouch.startX;
+                baseY = moveTouch.startY;
+                const dx = moveTouch.curX - moveTouch.startX;
+                const dy = moveTouch.curY - moveTouch.startY;
+                const dist = Math.hypot(dx, dy) || 1;
+                knobX = baseX + (dx / dist) * Math.min(dist, JOY_RADIUS);
+                knobY = baseY + (dy / dist) * Math.min(dist, JOY_RADIUS);
+                active = true;
+            } else {
+                // Idle joystick pad on the left so it's obvious where to put your thumb
+                baseX = 118;
+                baseY = canvas.height - 110;
+                knobX = baseX;
+                knobY = baseY;
+            }
+            ctx.globalAlpha = active ? 1 : 0.45;
+            ctx.strokeStyle = 'rgba(212, 175, 55, 0.75)';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(baseX, baseY, JOY_RADIUS, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(212, 175, 55, 0.55)';
+            ctx.beginPath();
+            ctx.arc(knobX, knobY, 24, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Fire zone hint on the right
+            ctx.globalAlpha = fireTouch ? 0.5 : 0.22;
+            ctx.fillStyle = '#e53935';
+            ctx.beginPath();
+            ctx.arc(canvas.width - 92, canvas.height - 92, 46, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+            ctx.font = 'bold 15px Tahoma';
+            ctx.textAlign = 'center';
+            ctx.fillText('حركة', baseX, baseY - JOY_RADIUS - 10);
+            ctx.fillText('إطلاق 🔥', canvas.width - 92, canvas.height - 87);
             ctx.restore();
         }
     }
