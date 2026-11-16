@@ -86,7 +86,7 @@
             gap: 10px;
             margin-bottom: 10px;
         }
-        #botBtn, #onlineBtn {
+        #botBtn, #onlineBtn, #restartBtn {
             background: #23301f;
             color: #f0c94b;
             border: 2px solid #d4af37;
@@ -98,6 +98,14 @@
             cursor: pointer;
             box-shadow: 0 3px 8px rgba(0,0,0,0.5);
             touch-action: manipulation;
+        }
+        #restartBtn {
+            background: #d4af37;
+            color: #111;
+            display: none;
+        }
+        #restartBtn:active {
+            transform: scale(0.97);
         }
         #botBtn.active {
             background: #d4af37;
@@ -245,23 +253,6 @@
             min-width: 104px;
             font-size: 15px;
         }
-        #restartBtn {
-            position: absolute;
-            top: 62%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: #d4af37;
-            color: #111;
-            border: none;
-            padding: 12px 28px;
-            font-size: 20px;
-            font-weight: bold;
-            border-radius: 8px;
-            cursor: pointer;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.6);
-            display: none;
-            z-index: 10;
-        }
         #restartBtn:hover {
             background: #f5d259;
         }
@@ -324,11 +315,11 @@
     <div id="mode-btns">
         <button id="botBtn" onclick="toggleBot()">🤖 تشغيل البوت (B)</button>
         <button id="onlineBtn" onclick="openOnlinePanel()">🌐 لعب أونلاين</button>
+        <button id="restartBtn" onclick="restartCurrent()">العب مرة أخرى 🔄</button>
     </div>
 
     <div id="game-container">
         <canvas id="gameCanvas" width="800" height="500"></canvas>
-        <button id="restartBtn" onclick="restartCurrent()">العب مرة أخرى 🔄</button>
     </div>
 
     <div id="onlinePanel">
