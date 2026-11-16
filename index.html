@@ -369,6 +369,7 @@
     </div>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.4/dist/mqtt.min.js"></script>
 <script>
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
@@ -431,8 +432,15 @@
         conn: null,
         role: null,
         code: '',
+        transport: 'peer',
+        mqtt: null,
+        topicIn: '',
+        topicOut: '',
+        helloAnswered: false,
         inputTimer: null,
         stateTimer: null,
+        fallbackTimer: null,
+        helloTimer: null,
         ignoreClose: false,
         remoteInput: { dx: 0, dy: 0, aim: 0, shoot: false }
     };
@@ -742,9 +750,105 @@
         onlineStatusEl.innerText = text;
     }
 
+    function isNetReady() {
+        if (net.transport === 'mqtt') return !!(net.mqtt && net.mqtt.connected);
+        return !!(net.conn && net.conn.open);
+    }
+
+    function netSend(data) {
+        if (net.transport === 'mqtt') {
+            if (net.mqtt && net.mqtt.connected) {
+                try { net.mqtt.publish(net.topicOut, JSON.stringify(data)); } catch (e) {}
+            }
+            return;
+        }
+        if (net.conn && net.conn.open) {
+            try { net.conn.send(data); } catch (e) {}
+        }
+    }
+
+    // If WebRTC/PeerJS can't connect (strict NAT, blocked ports...),
+    // switch automatically to a public MQTT relay over WSS.
+    function scheduleRelayFallback() {
+        clearTimeout(net.fallbackTimer);
+        net.fallbackTimer = setTimeout(() => {
+            if (isNetReady() || mode !== 'single') return;
+            setOnlineStatus('الاتصال المباشر بطيء… بجرب سيرفر احتياطي.');
+            switchToRelay(net.role, net.code);
+        }, 6000);
+    }
+
+    function switchToRelay(role, code) {
+        if (!role || !code) return;
+        net.transport = 'mqtt';
+        net.ignoreClose = true;
+        if (net.conn) {
+            try { net.conn.close(); } catch (e) {}
+            net.conn = null;
+        }
+        if (net.peer) {
+            try { net.peer.destroy(); } catch (e) {}
+            net.peer = null;
+        }
+        net.ignoreClose = false;
+        clearTimeout(net.fallbackTimer);
+
+        if (typeof mqtt === 'undefined') {
+            setOnlineStatus('مكتبة الاتصال الاحتياطي مش اتحملت. جرّب تحديث الصفحة.');
+            return;
+        }
+
+        const base = 'ahmedgame/v1/' + code;
+        net.topicIn = base + (role === 'host' ? '/toHost' : '/toGuest');
+        net.topicOut = base + (role === 'host' ? '/toGuest' : '/toHost');
+        net.helloAnswered = false;
+        setOnlineStatus('جاري الاتصال بالسيرفر الاحتياطي…');
+
+        const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {
+            clientId: 'ahmed_' + Math.random().toString(16).slice(2, 10),
+            clean: true,
+            connectTimeout: 8000,
+            reconnectPeriod: 2000
+        });
+        net.mqtt = client;
+
+        client.on('connect', () => {
+            client.subscribe(net.topicIn, { qos: 0 });
+            leaveOnlineBtn.style.display = 'block';
+            setOnlineStatus(role === 'host'
+                ? 'متصل ✅ (سيرفر احتياطي) استنى صاحبك ينضم…'
+                : 'متصل ✅ (سيرفر احتياطي) جاري بدء المباراة…');
+            clearInterval(net.helloTimer);
+            if (role === 'guest') {
+                netSend({ t: 'hello' });
+                net.helloTimer = setInterval(() => {
+                    if (mode !== 'pvp') netSend({ t: 'hello' });
+                }, 900);
+            } else {
+                netSend({ t: 'hostHere' });
+            }
+        });
+
+        client.on('message', (topic, payload) => {
+            let data;
+            try {
+                const text = typeof payload === 'string' ? payload : new TextDecoder().decode(payload);
+                data = JSON.parse(text);
+            } catch (e) {
+                return;
+            }
+            if (role === 'host') handleHostData(data);
+            else handleGuestData(data);
+        });
+
+        client.on('error', () => {
+            setOnlineStatus('السيرفر الاحتياطي مش راضي يتصل. جرّب شبكة تانية.');
+        });
+    }
+
     function openOnlinePanel() {
         onlinePanel.classList.add('open');
-        leaveOnlineBtn.style.display = (net.peer || net.conn) ? 'block' : 'none';
+        leaveOnlineBtn.style.display = (net.peer || net.conn || net.mqtt) ? 'block' : 'none';
     }
 
     function randomRoomCode() {
@@ -765,8 +869,12 @@
     function cleanupNet() {
         clearInterval(net.inputTimer);
         clearInterval(net.stateTimer);
+        clearInterval(net.helloTimer);
+        clearTimeout(net.fallbackTimer);
         net.inputTimer = null;
         net.stateTimer = null;
+        net.helloTimer = null;
+        net.fallbackTimer = null;
         net.ignoreClose = true;
         if (net.conn) {
             try { net.conn.close(); } catch (e) {}
@@ -776,15 +884,22 @@
             try { net.peer.destroy(); } catch (e) {}
             net.peer = null;
         }
+        if (net.mqtt) {
+            try { net.mqtt.end(true); } catch (e) {}
+            net.mqtt = null;
+        }
         net.role = null;
         net.code = '';
+        net.transport = 'peer';
+        net.topicIn = '';
+        net.topicOut = '';
+        net.helloAnswered = false;
         roomCodeWrap.style.display = 'none';
         roomCodeEl.innerText = '';
         leaveOnlineBtn.style.display = 'none';
     }
 
     function createRoom(attempt = 0) {
-        if (!peerLibReady()) return;
         if (mode === 'pvp') {
             setOnlineStatus('أنت في مباراة دلوقتي. اخرج الأول.');
             return;
@@ -794,6 +909,18 @@
         const code = randomRoomCode();
         net.code = code;
         net.role = 'host';
+        net.transport = 'peer';
+
+        roomCodeEl.innerText = code;
+        roomCodeWrap.style.display = 'block';
+        leaveOnlineBtn.style.display = 'block';
+
+        if (typeof Peer === 'undefined') {
+            setOnlineStatus('بأستخدم السيرفر الاحتياطي… ابعت الكود لصاحبك.');
+            switchToRelay('host', code);
+            return;
+        }
+
         setOnlineStatus('جاري إنشاء الغرفة…');
         createRoomBtn.disabled = true;
 
@@ -802,10 +929,8 @@
 
         peer.on('open', () => {
             createRoomBtn.disabled = false;
-            roomCodeEl.innerText = code;
-            roomCodeWrap.style.display = 'block';
-            leaveOnlineBtn.style.display = 'block';
             setOnlineStatus('الغرفة جاهزة ✅ ابعت الكود لصاحبك وهو ينضم.');
+            scheduleRelayFallback();
         });
 
         peer.on('error', err => {
@@ -824,6 +949,7 @@
                 try { peer.reconnect(); } catch (e) {}
             }
         });
+        scheduleRelayFallback();
     }
 
     function handleHostConnection(conn) {
@@ -835,9 +961,11 @@
         net.role = 'host';
 
         conn.on('open', () => {
+            clearTimeout(net.fallbackTimer);
+            net.transport = 'peer';
             setOnlineStatus('اتصل صاحبك ✅ جاري بدء المباراة…');
             startPvp('host');
-            try { conn.send({ t: 'start' }); } catch (e) {}
+            netSend({ t: 'start' });
         });
         conn.on('data', handleHostData);
         conn.on('close', handleDisconnect);
@@ -845,7 +973,6 @@
     }
 
     function joinRoom() {
-        if (!peerLibReady()) return;
         if (mode === 'pvp') {
             setOnlineStatus('أنت في مباراة بالفعل.');
             return;
@@ -859,6 +986,15 @@
         net.ignoreClose = false;
         net.role = 'guest';
         net.code = code;
+        net.transport = 'peer';
+        leaveOnlineBtn.style.display = 'block';
+
+        if (typeof Peer === 'undefined') {
+            setOnlineStatus('بأستخدم السيرفر الاحتياطي…');
+            switchToRelay('guest', code);
+            return;
+        }
+
         setOnlineStatus('جاري الاتصال بالغرفة…');
         joinRoomBtn.disabled = true;
 
@@ -870,8 +1006,8 @@
             net.conn = conn;
 
             conn.on('open', () => {
+                clearTimeout(net.fallbackTimer);
                 joinRoomBtn.disabled = false;
-                leaveOnlineBtn.style.display = 'block';
                 setOnlineStatus('متصل ✅ استنى صاحبك يبدأ المباراة…');
             });
             conn.on('data', handleGuestData);
@@ -885,6 +1021,7 @@
             if (type === 'peer-unavailable') setOnlineStatus('مفيش غرفة بالكود ده ❌ اتأكد من الكود.');
             else setOnlineStatus('فشل الاتصال: ' + (type || (err && err.message)));
         });
+        scheduleRelayFallback();
     }
 
     function handleHostData(data) {
@@ -894,19 +1031,37 @@
             net.remoteInput.dy = Number(data.dy) || 0;
             net.remoteInput.aim = Number(data.aim) || 0;
             net.remoteInput.shoot = !!data.shoot;
+        } else if (data.t === 'hello') {
+            if (net.transport === 'mqtt' && !net.helloAnswered) {
+                net.helloAnswered = true;
+                clearInterval(net.helloTimer);
+                net.helloTimer = null;
+                clearTimeout(net.fallbackTimer);
+                if (mode !== 'pvp') startPvp('host');
+                setOnlineStatus('اتصل صاحبك ✅ بدأت المباراة');
+                netSend({ t: 'start' });
+            }
         } else if (data.t === 'restartReq' && mode === 'pvp') {
             startPvp('host');
-            if (net.conn && net.conn.open) {
-                try { net.conn.send({ t: 'start', restart: true }); } catch (e) {}
-            }
+            netSend({ t: 'start', restart: true });
         }
     }
 
     function handleGuestData(data) {
         if (!data) return;
+        if (data.t === 'hostHere') {
+            if (mode !== 'pvp') netSend({ t: 'hello' });
+            return;
+        }
         if (data.t === 'start') {
+            clearInterval(net.helloTimer);
+            net.helloTimer = null;
             if (data.restart || mode !== 'pvp' || net.role !== 'guest') startPvp('guest');
         } else if (data.t === 'state') {
+            if (net.helloTimer) {
+                clearInterval(net.helloTimer);
+                net.helloTimer = null;
+            }
             if (mode !== 'pvp' || net.role !== 'guest') startPvp('guest');
             applyPvpSnapshot(data);
         }
@@ -914,6 +1069,7 @@
 
     function handleDisconnect() {
         if (net.ignoreClose) return;
+        if (net.transport === 'mqtt') return;
         clearInterval(net.inputTimer);
         clearInterval(net.stateTimer);
         net.inputTimer = null;
@@ -942,16 +1098,16 @@
     }
 
     function restartPvpMatch() {
-        if (!net.conn || !net.conn.open) {
+        if (!isNetReady()) {
             exitOnline();
             return;
         }
         if (net.role === 'host') {
             startPvp('host');
-            try { net.conn.send({ t: 'start', restart: true }); } catch (e) {}
+            netSend({ t: 'start', restart: true });
         } else {
             setOnlineStatus('استنى صاحبك يعيد المباراة…');
-            try { net.conn.send({ t: 'restartReq' }); } catch (e) {}
+            netSend({ t: 'restartReq' });
         }
     }
 
@@ -992,12 +1148,15 @@
 
         clearInterval(net.inputTimer);
         clearInterval(net.stateTimer);
+        clearInterval(net.helloTimer);
         net.inputTimer = null;
         net.stateTimer = null;
+        net.helloTimer = null;
+        const relay = net.transport === 'mqtt';
         if (role === 'host') {
-            net.stateTimer = setInterval(broadcastPvpState, 50);
+            net.stateTimer = setInterval(broadcastPvpState, relay ? 60 : 50);
         } else {
-            net.inputTimer = setInterval(sendGuestInput, 33);
+            net.inputTimer = setInterval(sendGuestInput, relay ? 60 : 33);
         }
 
         requestAnimationFrame(pvpLoop);
@@ -1152,19 +1311,17 @@
     }
 
     function sendGuestInput() {
-        if (!net.conn || !net.conn.open || !pvp || net.role !== 'guest') return;
+        if (!isNetReady() || !pvp || net.role !== 'guest') return;
         const v = getInputVector();
         const me = pvp.players[1];
         const aim = Math.atan2(mouse.y - me.y, mouse.x - me.x);
-        try {
-            net.conn.send({
-                t: 'input',
-                dx: Math.round(v.x * 100) / 100,
-                dy: Math.round(v.y * 100) / 100,
-                aim: Math.round(aim * 100) / 100,
-                shoot: (shootingHeld || fireTouch || mouseHeld) && !pvp.over
-            });
-        } catch (e) {}
+        netSend({
+            t: 'input',
+            dx: Math.round(v.x * 100) / 100,
+            dy: Math.round(v.y * 100) / 100,
+            aim: Math.round(aim * 100) / 100,
+            shoot: (shootingHeld || fireTouch || mouseHeld) && !pvp.over
+        });
     }
 
     function applyPvpSnapshot(data) {
@@ -1218,7 +1375,7 @@
     }
 
     function broadcastPvpState() {
-        if (!net.conn || !net.conn.open || !pvp) return;
+        if (!isNetReady() || !pvp) return;
         const pack = p => ({
             x: Math.round(p.x),
             y: Math.round(p.y),
@@ -1228,15 +1385,13 @@
             a: p.alive ? 1 : 0,
             r: p.alive ? 0 : Math.max(0, Math.round(p.respawnAt - performance.now()))
         });
-        try {
-            net.conn.send({
-                t: 'state',
-                p: [pack(pvp.players[0]), pack(pvp.players[1])],
-                b: pvp.bullets.map(b => ({ x: Math.round(b.x), y: Math.round(b.y), o: b.owner })),
-                o: pvp.over ? 1 : 0,
-                w: pvp.winner
-            });
-        } catch (e) {}
+        netSend({
+            t: 'state',
+            p: [pack(pvp.players[0]), pack(pvp.players[1])],
+            b: pvp.bullets.map(b => ({ x: Math.round(b.x), y: Math.round(b.y), o: b.owner })),
+            o: pvp.over ? 1 : 0,
+            w: pvp.winner
+        });
     }
 
     function pvpLoop(now) {
